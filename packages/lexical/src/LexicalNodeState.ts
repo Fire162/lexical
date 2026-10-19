@@ -404,6 +404,175 @@ export interface StateValueConfig<V> {
    * value to the default.
    */
   resetOnCopyNode?: boolean;
+  /**
+   * How collaboration bindings store this state, see
+   * {@link StateCollabEncoding}. The default, `'value'`, stores the
+   * serialized value as one entry.
+   *
+   * @experimental
+   */
+  collab?: StateCollabEncoding;
+}
+
+/**
+ * How a collaboration binding stores a NodeState value.
+ *
+ * - `'value'` (the default): the serialized value (the result of `unparse`)
+ *   is stored as one entry, so when two peers change it concurrently one of
+ *   the values wins.
+ * - `'set'`: the value is a set of strings. Its serialized form must be an
+ *   array of strings, for example a `ReadonlySet<string>` unparsed to a
+ *   sorted array, and `parse` receives such an array. A binding that
+ *   supports it stores each member as its own entry (see
+ *   {@link splitCollabStateEntries}), so concurrent additions and removals of
+ *   different members by different peers all apply, rather than one peer's
+ *   set replacing the other's. In JSON the value is one array.
+ *
+ * The key of a `'set'` state must not contain
+ * {@link NODE_STATE_SET_MEMBER_SEPARATOR}. An entry `<key>\u001f<member>`
+ * (from a binding, or from the JSON of an editor whose Lexical version
+ * stored the members as they were) is read as a member of the state `<key>`
+ * only when a `'set'` StateConfig with that key is known for the node type
+ * (registered with `$config` `stateConfigs`, or used on a node of that
+ * type); otherwise it is kept as an ordinary key, as is any key that a
+ * StateConfig uses exactly.
+ *
+ * @experimental
+ */
+export type StateCollabEncoding = 'value' | 'set';
+
+/**
+ * The separator between the key of a set-valued state and one of its members
+ * in an entry key written by {@link splitCollabStateEntries}: the member `c1`
+ * of the state `markIds` is the entry `"markIds\u001fc1"`. It is the ASCII
+ * unit separator, so it can not be confused with the keys that state
+ * configurations use in practice (which often contain `:` or `/`).
+ *
+ * @experimental
+ */
+export const NODE_STATE_SET_MEMBER_SEPARATOR = '\u001f';
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every(member => typeof member === 'string')
+  );
+}
+
+/**
+ * For collaboration bindings: expand serialized NodeState entries (state key
+ * to serialized value) into the entries to store, so that each member of a
+ * set-valued state is its own entry `<key>\u001f<member>` with the value
+ * `true`. Other entries, and a set-valued entry whose value is not an array
+ * of strings, are returned unchanged.
+ *
+ * Reading needs no inverse: `NodeState` joins the member entries of a known
+ * set-valued state back into its value (see {@link StateCollabEncoding}), so
+ * a binding passes the stored entries to it as they are. Use
+ * {@link $getCollabSetStateKeys} to find the set-valued keys of a node.
+ *
+ * @param entries Serialized NodeState entries
+ * @param isSetKey Whether the state with this key is set-valued
+ * @returns The entries to store
+ *
+ * @experimental
+ */
+export function splitCollabStateEntries(
+  entries: Readonly<Record<string, unknown>>,
+  isSetKey: (key: string) => boolean,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const key in entries) {
+    const value = entries[key];
+    if (
+      isSetKey(key) &&
+      !key.includes(NODE_STATE_SET_MEMBER_SEPARATOR) &&
+      isStringArray(value)
+    ) {
+      for (const member of value) {
+        result[key + NODE_STATE_SET_MEMBER_SEPARATOR + member] = true;
+      }
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+/**
+ * For collaboration bindings: the keys of the set-valued states (with
+ * {@link StateValueConfig.collab} `'set'`) that are known for `node`: used
+ * on this NodeState, or registered for its node type. Without a NodeState on
+ * the node, the registration of its type in the active editor is used, so it
+ * needs an active editor then.
+ *
+ * @experimental
+ */
+export function $getCollabSetStateKeys(node: LexicalNode): Set<string> {
+  const keys = new Set<string>();
+  const state = node.__state;
+  if (state) {
+    for (const stateConfig of state.knownState.keys()) {
+      if (stateConfig.collab === 'set') {
+        keys.add(stateConfig.key);
+      }
+    }
+  }
+  const {sharedConfigMap} = state
+    ? state.sharedNodeState
+    : $getSharedNodeState(node);
+  for (const stateConfig of sharedConfigMap.values()) {
+    if (stateConfig.collab === 'set') {
+      keys.add(stateConfig.key);
+    }
+  }
+  return keys;
+}
+
+/**
+ * The set-valued StateConfig and the member that an entry key is for, when
+ * it is `<key>\u001f<member>`, `<key>` is a known set-valued state, and no
+ * StateConfig uses the entry key itself.
+ */
+function getSetMemberEntry(
+  sharedConfigMap: SharedConfigMap,
+  entryKey: string,
+): null | [AnyStateConfig, string] {
+  const index = entryKey.indexOf(NODE_STATE_SET_MEMBER_SEPARATOR);
+  if (index <= 0 || sharedConfigMap.has(entryKey)) {
+    return null;
+  }
+  const stateConfig = sharedConfigMap.get(entryKey.slice(0, index));
+  return stateConfig !== undefined && stateConfig.collab === 'set'
+    ? [stateConfig, entryKey.slice(index + 1)]
+    : null;
+}
+
+/**
+ * Add (when `present`) or remove a member of a set-valued state, working on
+ * its serialized form.
+ */
+function withSetMember<V>(
+  stateConfig: StateConfig<string, V>,
+  value: V,
+  member: string,
+  present: boolean,
+): V {
+  const json = stateConfig.unparse(value);
+  const members = new Set(isStringArray(json) ? json : []);
+  if (members.has(member) === present) {
+    return value;
+  }
+  if (present) {
+    members.add(member);
+  } else {
+    members.delete(member);
+  }
+  return stateConfig.parse(Array.from(members).sort());
+}
+
+/** A stored member entry is present unless null, undefined or false */
+function isMemberPresent(value: unknown): boolean {
+  return value !== null && value !== undefined && value !== false;
 }
 
 /**
@@ -434,6 +603,13 @@ export class StateConfig<K extends string | symbol, V> {
   readonly defaultValue: V;
   readonly resetOnCopyNode: boolean;
   /**
+   * How collaboration bindings store this state, from the StateValueConfig
+   * (default `'value'`). See {@link StateCollabEncoding}.
+   *
+   * @experimental
+   */
+  readonly collab: StateCollabEncoding;
+  /**
    * The {@link SerializationSchema} for this state's value, present when its
    * `parse` is a schema (e.g. `createState('mode', {parse: enumValue([...])})`).
    * It exposes the value's introspectable domain so tooling such as
@@ -442,6 +618,13 @@ export class StateConfig<K extends string | symbol, V> {
    */
   readonly schema?: AnySerializationSchema;
   constructor(key: K, stateValueConfig: StateValueConfig<V>) {
+    invariant(
+      stateValueConfig.collab !== 'set' ||
+        typeof key !== 'string' ||
+        !key.includes(NODE_STATE_SET_MEMBER_SEPARATOR),
+      "createState: the key %s of a collab: 'set' state must not contain U+001F (NODE_STATE_SET_MEMBER_SEPARATOR)",
+      JSON.stringify(key),
+    );
     this.key = key;
     // Binding below strips a schema's own properties from this.parse, so
     // resolve it first and keep the original when it carries introspectable
@@ -475,6 +658,7 @@ export class StateConfig<K extends string | symbol, V> {
     this.defaultValue =
       schema !== undefined ? schema.defaultValue : this.parse(undefined);
     this.resetOnCopyNode = stateValueConfig.resetOnCopyNode || false;
+    this.collab = stateValueConfig.collab || 'value';
   }
 }
 
@@ -876,6 +1060,9 @@ export class NodeState<T extends LexicalNode> {
       // Only update if the key was unknown
       this.updateFromKnown(stateConfig, parsed);
     }
+    if (stateConfig.collab === 'set' && this.unknownState) {
+      parsed = this.foldSetMembers(stateConfig, parsed);
+    }
     return parsed;
   }
 
@@ -944,16 +1131,18 @@ export class NodeState<T extends LexicalNode> {
     }
     const {sharedNodeState, unknownState} = this;
     const nextKnownState = new Map(this.knownState);
+    const [nextUnknownState, folded] = parseAndPruneNextUnknownState(
+      sharedNodeState.sharedConfigMap,
+      nextKnownState,
+      unknownState,
+    );
     return new NodeState(
       node,
       sharedNodeState,
-      parseAndPruneNextUnknownState(
-        sharedNodeState.sharedConfigMap,
-        nextKnownState,
-        unknownState,
-      ),
+      nextUnknownState,
       nextKnownState,
-      this.size,
+      // Folding the member entries of a set-valued state changes the count
+      folded ? undefined : this.size,
     );
   }
 
@@ -1005,6 +1194,23 @@ export class NodeState<T extends LexicalNode> {
     if (UNSAFE_STATE_KEYS.has(k)) {
       return;
     }
+    const memberEntry = getSetMemberEntry(
+      this.sharedNodeState.sharedConfigMap,
+      k,
+    );
+    if (memberEntry !== null) {
+      const [setConfig, member] = memberEntry;
+      this.updateFromKnown(
+        setConfig,
+        withSetMember(
+          setConfig,
+          this.getValue(setConfig),
+          member,
+          isMemberPresent(v),
+        ),
+      );
+      return;
+    }
     const stateConfig = this.sharedNodeState.sharedConfigMap.get(k);
     if (stateConfig) {
       this.updateFromKnown(stateConfig, stateConfig.parse(v));
@@ -1028,6 +1234,43 @@ export class NodeState<T extends LexicalNode> {
    *
    * @param unknownState The new state in serialized form
    */
+  /**
+   * @internal
+   *
+   * Move the member entries of a set-valued state out of unknownState and
+   * into its value (see {@link StateCollabEncoding}).
+   */
+  foldSetMembers<V>(stateConfig: StateConfig<string, V>, value: V): V {
+    const {unknownState} = this;
+    if (!unknownState) {
+      return value;
+    }
+    const prefix = stateConfig.key + NODE_STATE_SET_MEMBER_SEPARATOR;
+    let next = value;
+    let found = false;
+    for (const k in unknownState) {
+      if (
+        k.startsWith(prefix) &&
+        !this.sharedNodeState.sharedConfigMap.has(k)
+      ) {
+        found = true;
+        next = withSetMember(
+          stateConfig,
+          next,
+          k.slice(prefix.length),
+          isMemberPresent(unknownState[k]),
+        );
+        delete unknownState[k];
+        this.size--;
+      }
+    }
+    if (found) {
+      this.unknownState = undefinedIfEmpty(unknownState);
+      this.updateFromKnown(stateConfig, next);
+    }
+    return next;
+  }
+
   updateFromJSON(unknownState: undefined | UnknownStateRecord): void {
     const {knownState} = this;
     // Reset all known state to defaults
@@ -1040,8 +1283,18 @@ export class NodeState<T extends LexicalNode> {
     this.size = knownState.size;
     this.unknownState = undefined;
     if (unknownState) {
-      for (const [k, v] of Object.entries(unknownState)) {
-        this.updateFromUnknown(k, v);
+      const entries = Object.entries(unknownState);
+      // Whole values first, so that the member entries of a set-valued
+      // state add to (rather than being replaced by) its value
+      for (const [k, v] of entries) {
+        if (!k.includes(NODE_STATE_SET_MEMBER_SEPARATOR)) {
+          this.updateFromUnknown(k, v);
+        }
+      }
+      for (const [k, v] of entries) {
+        if (k.includes(NODE_STATE_SET_MEMBER_SEPARATOR)) {
+          this.updateFromUnknown(k, v);
+        }
       }
     }
   }
@@ -1181,8 +1434,9 @@ function parseAndPruneNextUnknownState(
   sharedConfigMap: SharedConfigMap,
   nextKnownState: KnownStateMap,
   unknownState: undefined | UnknownStateRecord,
-): undefined | UnknownStateRecord {
+): [undefined | UnknownStateRecord, boolean] {
   let nextUnknownState: undefined | UnknownStateRecord = undefined;
+  let members: undefined | [AnyStateConfig, string, unknown][];
   if (unknownState) {
     for (const [k, v] of Object.entries(unknownState)) {
       if (UNSAFE_STATE_KEYS.has(k)) {
@@ -1193,13 +1447,35 @@ function parseAndPruneNextUnknownState(
         if (!nextKnownState.has(stateConfig)) {
           nextKnownState.set(stateConfig, stateConfig.parse(v));
         }
+        continue;
+      }
+      const memberEntry = getSetMemberEntry(sharedConfigMap, k);
+      if (memberEntry !== null) {
+        members = members || [];
+        members.push([memberEntry[0], memberEntry[1], v]);
       } else {
         nextUnknownState = nextUnknownState || {};
         nextUnknownState[k] = v;
       }
     }
   }
-  return nextUnknownState;
+  if (members) {
+    // After the whole values, see NodeState.updateFromJSON
+    for (const [stateConfig, member, v] of members) {
+      nextKnownState.set(
+        stateConfig,
+        withSetMember(
+          stateConfig,
+          nextKnownState.has(stateConfig)
+            ? nextKnownState.get(stateConfig)
+            : stateConfig.defaultValue,
+          member,
+          isMemberPresent(v),
+        ),
+      );
+    }
+  }
+  return [nextUnknownState, members !== undefined];
 }
 
 /**

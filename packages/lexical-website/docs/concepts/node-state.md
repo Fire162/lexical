@@ -319,6 +319,47 @@ source, it is only parsed once the first time it is read.
 Values that do not come from external sources are not parsed, and
 values that are not used are never parsed.
 
+## Collaboration: set-valued state
+
+By default a collaboration binding stores each NodeState key as one entry
+holding its serialized value, so when two peers change the same key of the
+same node concurrently, one value wins. For state that is a set of strings,
+such as the ids of the comments on a piece of text, declare
+`collab: 'set'` (experimental) and serialize the value as an array of
+strings:
+
+```ts
+const tagsState = createState('tags', {
+  collab: 'set',
+  isEqual: (a, b) => a.size === b.size && [...a].every(tag => b.has(tag)),
+  parse: (v): ReadonlySet<string> =>
+    new Set(Array.isArray(v) ? v.filter(t => typeof t === 'string') : []),
+  unparse: v => Array.from(v).sort(),
+});
+```
+
+In JSON the value is still one array (`"$": {"tags": ["a", "b"]}`). The Yjs
+bindings store each member as its own entry (`tags` followed by
+`NODE_STATE_SET_MEMBER_SEPARATOR` and the member), so concurrent additions
+and removals of different members by different peers all apply: the v2
+binding as one text or element attribute per member, the v1 binding as one
+entry per member in the node's state map. Bindings use
+`splitCollabStateEntries` and `$getCollabSetStateKeys` to write them.
+
+NodeState joins a member entry (`tags\u001fa`) back into the set, on JSON
+import as well as from a binding, only when a `'set'` StateConfig with that
+key (`tags`) is known for the node type: declared in its `$config`
+`stateConfigs`, or used on a node of that type. Until then the entry is an
+ordinary key that is kept and written back as it is, and so is any key that
+a StateConfig uses exactly. So:
+
+- register the StateConfig on every peer (with `$config`, or let the
+  extension that owns it register it, as `MarkStateExtension` does), so
+  that each peer joins and splits the members;
+- the key of a `'set'` state must not contain `NODE_STATE_SET_MEMBER_SEPARATOR`
+  (`createState` throws), and keys of the form `<key>\u001f<member>` are
+  reserved for its members.
+
 ## Capabilities
 
 Current:

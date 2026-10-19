@@ -22,6 +22,7 @@ import {
   $isTextNode,
   $removeSlot,
   $setSlot,
+  type AnyStateConfig,
   createEditor,
   type DecoratorNode,
   type EditorState,
@@ -29,9 +30,11 @@ import {
   getDeclaredSlots,
   isLexicalEditor,
   type LexicalNode,
+  NODE_STATE_SET_MEMBER_SEPARATOR,
   type NodeKey,
   type NodeMap,
   type RangeSelection,
+  splitCollabStateEntries,
   type TextNode,
 } from 'lexical';
 import {Doc, Map as YMap, XmlElement, XmlText} from 'yjs';
@@ -617,7 +620,69 @@ function $syncNodeStateToLexical(
   // This should only called when creating the node initially,
   // incremental updates to state come in through YMapEvent
   // with the __state as the target.
+  // Member entries of a set-valued state (`<key>\u001f<member>`) are joined
+  // by NodeState itself.
   $getWritableNodeState(lexicalNode).updateFromJSON(existingState.toJSON());
+}
+
+/**
+ * The stored entries of a set-valued state in a previous NodeState: its
+ * known value split per member, or, before it was parsed, its whole value
+ * and member entries as they were read.
+ */
+function prevSetStateEntries(
+  stateConfig: AnyStateConfig,
+  prevKnown: ReadonlyMap<AnyStateConfig, unknown>,
+  prevUnknown: undefined | {readonly [k: string]: unknown},
+): Record<string, unknown> {
+  const isSetKey = () => true;
+  if (prevKnown.has(stateConfig)) {
+    return splitCollabStateEntries(
+      {[stateConfig.key]: stateConfig.unparse(prevKnown.get(stateConfig))},
+      isSetKey,
+    );
+  }
+  const entries: Record<string, unknown> = {};
+  if (prevUnknown) {
+    const prefix = stateConfig.key + NODE_STATE_SET_MEMBER_SEPARATOR;
+    for (const k in prevUnknown) {
+      if (k === stateConfig.key) {
+        Object.assign(
+          entries,
+          splitCollabStateEntries({[k]: prevUnknown[k]}, isSetKey),
+        );
+      } else if (k.startsWith(prefix) && prevUnknown[k] === true) {
+        entries[k] = true;
+      }
+    }
+  }
+  return entries;
+}
+
+/**
+ * Write the members of a set-valued state as one entry each (see
+ * splitCollabStateEntries): set the members that were added and delete the
+ * ones that were removed, so concurrent changes to different members merge.
+ */
+function syncSetStateEntries(
+  stateMap: YMap<unknown>,
+  prevEntries: Record<string, unknown>,
+  nextEntries: Record<string, unknown>,
+): void {
+  const isAttached = stateMap.doc !== null;
+  for (const entryKey in prevEntries) {
+    if (!(entryKey in nextEntries) && (!isAttached || stateMap.has(entryKey))) {
+      stateMap.delete(entryKey);
+    }
+  }
+  for (const entryKey in nextEntries) {
+    if (
+      !(entryKey in prevEntries) ||
+      (isAttached && stateMap.get(entryKey) !== nextEntries[entryKey])
+    ) {
+      stateMap.set(entryKey, nextEntries[entryKey]);
+    }
+  }
 }
 
 function syncNodeStateFromLexical(
@@ -658,8 +723,20 @@ function syncNodeStateFromLexical(
     }
   }
   for (const [stateConfig, v] of known) {
-    if (prevKnown.get(stateConfig) !== v) {
-      stateMap.set(stateConfig.key, stateConfig.unparse(v));
+    const prevValue = prevKnown.get(stateConfig);
+    if (prevValue !== v) {
+      if (stateConfig.collab === 'set') {
+        syncSetStateEntries(
+          stateMap,
+          prevSetStateEntries(stateConfig, prevKnown, prevUnknown),
+          splitCollabStateEntries(
+            {[stateConfig.key]: stateConfig.unparse(v)},
+            () => true,
+          ),
+        );
+      } else {
+        stateMap.set(stateConfig.key, stateConfig.unparse(v));
+      }
     }
   }
   if (!existingState) {
