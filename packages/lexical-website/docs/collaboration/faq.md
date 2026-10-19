@@ -156,3 +156,18 @@ It's achievable by leveraging headless Lexical and no-op provider for Yjs:
   }
   ```
 </details>
+
+## Collaborators with different node types
+
+Clients in one room can run builds that register different node classes, for
+example while a new node type rolls out. When a client receives content of a
+node type it has not registered, it keeps that content in the Yjs document
+untouched but does not show it, and never deletes, rewrites or reorders it.
+Edits made inside that content by clients that do register the type keep
+syncing between them. An element whose text sits next to such content (for
+example a paragraph with an unknown inline node) is hidden as a whole on that
+client until the unknown content is gone.
+
+Each unregistered type is reported once per editor through the editor's
+`onWarn` handler, so you can route it to your telemetry. Register the node
+class on every client to show the content.
