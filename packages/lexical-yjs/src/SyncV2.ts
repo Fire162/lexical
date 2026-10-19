@@ -22,12 +22,16 @@
  * For non-text nodes, we use the XmlElement's attributes (YMap under the hood) to sync properties
  * and state. The former are stored using their names as keys, and the latter are stored with a
  * prefix. (NB: '$' couldn't be used as the prefix because it breaks XmlElement.toDOM().)
+ * A set-valued state (StateConfig `collab: 'set'`) is stored as one attribute per member
+ * (`s_<key>\u001f<member>`, see splitCollabStateEntries), so that concurrent changes to
+ * different members merge. NodeState joins such member attributes back into the set.
  */
 
 import type {BindingV2} from './Bindings';
 
 import invariant from '@lexical/internal/invariant';
 import {
+  $getCollabSetStateKeys,
   $getSelection,
   $getSlot,
   $getSlotNames,
@@ -42,6 +46,7 @@ import {
   type LexicalNode,
   type NodeKey,
   RootNode,
+  splitCollabStateEntries,
   TextNode,
 } from 'lexical';
 import {
@@ -210,6 +215,8 @@ export const $createOrUpdateNodeFromYElement = (
     const writableState = $getWritableNodeState(node);
     for (const changedKey of keysChanged) {
       if (changedKey.startsWith(STATE_KEY_PREFIX)) {
+        // A member attribute of a set-valued state adds or removes that
+        // member (NodeState.updateFromUnknown)
         const stateKey = attrKeyToStateKey(changedKey);
         writableState.updateFromUnknown(stateKey, state[stateKey]);
       }
@@ -584,7 +591,7 @@ const $createTypeFromElementNode = (
   const type = new XmlElement(node.getType());
   const attrs = {
     ...propertiesToAttributes(node, binding),
-    ...stateToAttributes(node),
+    ...$stateToAttributes(node),
   };
   for (const key in attrs) {
     const val = attrs[key];
@@ -724,7 +731,7 @@ const equalYTextLText = (
         d.insert === ltext.getTextContent() &&
         type === ltext.getType() &&
         equalAttrs(propertyAttrs, propertiesToAttributes(ltext, binding)) &&
-        equalAttrs(stateAttrs, stateToAttributes(ltext))
+        equalAttrs(stateAttrs, $stateToAttributes(ltext))
       );
     })
   );
@@ -784,7 +791,7 @@ const $equalYTypePNode = (
       ytype._length === normalizedContent.length &&
       equalAttrs(yattrs, {
         ...propertiesToAttributes(lnode, binding),
-        ...stateToAttributes(lnode),
+        ...$stateToAttributes(lnode),
       }) &&
       $equalSlots(ytype, lnode, binding) &&
       ytype
@@ -896,7 +903,7 @@ const $updateYText = (
       attributes: Object.assign({}, nAttrs, {
         ...(nodeType !== TextNode.getType() && {t: nodeType}),
         p,
-        ...stateToAttributes(node),
+        ...$stateToAttributes(node),
         ...(i > 0 && {i}), // Prevent Yjs from merging text nodes itself.
       }),
       insert: node.getTextContent(),
@@ -972,18 +979,26 @@ const attrKeyToStateKey = (key: string) => {
   return key.slice(STATE_KEY_PREFIX.length);
 };
 
-const stateToAttributes = (node: LexicalNode) => {
+const $stateToAttributes = (node: LexicalNode) => {
   const state = node.__state;
   if (!state) {
     return {};
   }
   const [unknown = {}, known] = state.getInternalState();
-  const attrs: Record<string, unknown> = {};
+  const entries: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(unknown)) {
-    attrs[stateKeyToAttrKey(k)] = v;
+    entries[k] = v;
   }
   for (const [stateConfig, v] of known) {
-    attrs[stateKeyToAttrKey(stateConfig.key)] = stateConfig.unparse(v);
+    entries[stateConfig.key] = stateConfig.unparse(v);
+  }
+  const setStateKeys = $getCollabSetStateKeys(node);
+  const attrs: Record<string, unknown> = {};
+  // Member entries this editor has not joined (no set-valued StateConfig is
+  // known for them) are unknown keys and are written back as they are.
+  const split = splitCollabStateEntries(entries, key => setStateKeys.has(key));
+  for (const k in split) {
+    attrs[stateKeyToAttrKey(k)] = split[k];
   }
   return attrs;
 };
@@ -1008,7 +1023,7 @@ export const $updateYFragment = (
     const yDomAttrs = yDomFragment.getAttributes();
     const lexicalAttrs = {
       ...propertiesToAttributes(node, binding),
-      ...stateToAttributes(node),
+      ...$stateToAttributes(node),
     };
     for (const key in lexicalAttrs) {
       if (lexicalAttrs[key] != null) {

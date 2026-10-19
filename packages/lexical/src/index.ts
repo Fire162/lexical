@@ -241,6 +241,7 @@ export type {
 } from './LexicalNode';
 export {$isLexicalNode, buildImportMap} from './LexicalNode';
 export {
+  $getCollabSetStateKeys,
   $getState,
   $getStateChange,
   $getWritableNodeState,
@@ -251,8 +252,11 @@ export {
   type LexicalSchemaInput,
   NODE_STATE_DIRECT,
   NODE_STATE_LATEST,
+  NODE_STATE_SET_MEMBER_SEPARATOR,
   type NodeStateJSON,
   type NodeStateVersion,
+  splitCollabStateEntries,
+  type StateCollabEncoding,
   type StateConfig,
   type StateConfigKey,
   type StateConfigValue,

@@ -10,10 +10,13 @@ import {
   $create,
   $createParagraphNode,
   $createTextNode,
+  $getCollabSetStateKeys,
   $getRoot,
   $getState,
   $getStateChange,
+  $getWritableNodeState,
   $isParagraphNode,
+  $parseSerializedNode,
   $setState,
   createEditor,
   createState,
@@ -21,11 +24,13 @@ import {
   type LexicalExportJSON,
   NODE_STATE_DIRECT,
   NODE_STATE_KEY,
+  NODE_STATE_SET_MEMBER_SEPARATOR,
   type NodeStateJSON,
   ParagraphNode,
   type RootNode,
   type SerializedElementNode,
   type SerializedLexicalNode,
+  splitCollabStateEntries,
   type StateValueOrUpdater,
 } from 'lexical';
 import {beforeEach, describe, expect, expectTypeOf, test} from 'vitest';
@@ -1104,5 +1109,201 @@ describe('importJSON applies state to the node it just built', () => {
       expect(p.getIndent()).toBe(3);
       expect(p.getTextContent()).toBe('y');
     });
+  });
+});
+
+describe('collab encoding of set-valued state', () => {
+  const S = NODE_STATE_SET_MEMBER_SEPARATOR;
+  const tagsState = createState('tags', {
+    collab: 'set',
+    isEqual: (a: ReadonlySet<string>, b: ReadonlySet<string>) =>
+      a.size === b.size && Array.from(a).every(tag => b.has(tag)),
+    parse: (v: unknown): ReadonlySet<string> =>
+      new Set(Array.isArray(v) ? v.filter(t => typeof t === 'string') : []),
+    unparse: (v: ReadonlySet<string>) => Array.from(v).sort(),
+  });
+  const colorState = createState('color', {
+    parse: (v: unknown) => (typeof v === 'string' ? v : ''),
+  });
+
+  test('collab defaults to value', () => {
+    expect(colorState.collab).toBe('value');
+    expect(tagsState.collab).toBe('set');
+  });
+
+  test('splitCollabStateEntries stores each member as its own entry', () => {
+    const isSetKey = (key: string) => key === 'tags';
+    expect(
+      splitCollabStateEntries(
+        {color: 'red', 'my:key': ['x'], tags: ['a', 'b:c']},
+        isSetKey,
+      ),
+    ).toEqual({
+      color: 'red',
+      'my:key': ['x'],
+      [`tags${S}a`]: true,
+      [`tags${S}b:c`]: true,
+    });
+    // An empty set has no entries, a malformed value is stored whole
+    expect(splitCollabStateEntries({tags: []}, isSetKey)).toEqual({});
+    expect(splitCollabStateEntries({tags: 'oops'}, isSetKey)).toEqual({
+      tags: 'oops',
+    });
+  });
+
+  function createTagsEditor() {
+    return createEditor({
+      nodes: [],
+      onError: error => {
+        throw error;
+      },
+    });
+  }
+
+  function $paragraphFromJSON(state: Record<string, unknown>) {
+    return $parseSerializedNode({
+      [NODE_STATE_KEY]: state,
+      children: [],
+      direction: null,
+      format: '',
+      indent: 0,
+      textFormat: 0,
+      textStyle: '',
+      type: 'paragraph',
+      version: 1,
+    } as SerializedElementNode);
+  }
+
+  test('member entries in JSON are joined into a known set-valued state', () => {
+    // JSON saved by an editor whose Lexical version kept the member entries
+    // of a collaboration binding as they were
+    const editor = createTagsEditor();
+    editor.update(
+      () => {
+        // The state is known for the node type once it has been used
+        $getState($createParagraphNode(), tagsState);
+        const paragraph = $paragraphFromJSON({
+          color: 'red',
+          tags: ['z'],
+          [`tags${S}a`]: true,
+          [`tags${S}b:c`]: true,
+          [`tags${S}gone`]: null,
+        });
+        expect(Array.from($getState(paragraph, tagsState)).sort()).toEqual([
+          'a',
+          'b:c',
+          'z',
+        ]);
+        expect(paragraph.exportJSON()[NODE_STATE_KEY]).toEqual({
+          color: 'red',
+          tags: ['a', 'b:c', 'z'],
+        });
+      },
+      {discrete: true},
+    );
+  });
+
+  test('member entries read before the state is known are joined on first use', () => {
+    const editor = createTagsEditor();
+    editor.update(
+      () => {
+        const paragraph = $paragraphFromJSON({[`tags${S}a`]: true});
+        // Not known yet: kept as an ordinary key
+        expect(paragraph.exportJSON()[NODE_STATE_KEY]).toEqual({
+          [`tags${S}a`]: true,
+        });
+        expect(Array.from($getState(paragraph, tagsState))).toEqual(['a']);
+        expect(paragraph.exportJSON()[NODE_STATE_KEY]).toEqual({tags: ['a']});
+        // and when a writable copy is made after the state became known
+        const other = $paragraphFromJSON({[`tags${S}b`]: true});
+        $setState(other, colorState, 'blue');
+        expect(other.getLatest().exportJSON()[NODE_STATE_KEY]).toEqual({
+          color: 'blue',
+          tags: ['b'],
+        });
+      },
+      {discrete: true},
+    );
+  });
+
+  test('a member entry adds or removes one member', () => {
+    const editor = createTagsEditor();
+    editor.update(
+      () => {
+        const paragraph = $createParagraphNode();
+        $setState(paragraph, tagsState, new Set(['a', 'b']));
+        const state = $getWritableNodeState(paragraph.getWritable());
+        state.updateFromUnknown(`tags${S}c`, true);
+        state.updateFromUnknown(`tags${S}a`, undefined);
+        expect(Array.from($getState(paragraph, tagsState)).sort()).toEqual([
+          'b',
+          'c',
+        ]);
+      },
+      {discrete: true},
+    );
+  });
+
+  test('a key with U+001F that is not a member of a known set is kept as is', () => {
+    const plainState = createState(`plain${S}key`, {
+      parse: (v: unknown) => (typeof v === 'string' ? v : ''),
+    });
+    const editor = createTagsEditor();
+    editor.update(
+      () => {
+        $getState($createParagraphNode(), tagsState);
+        const paragraph = $paragraphFromJSON({
+          // `other` is not a set-valued state
+          [`other${S}x`]: 1,
+          // a StateConfig uses this exact key
+          [`plain${S}key`]: 'v',
+        });
+        expect($getState(paragraph, plainState)).toBe('v');
+        expect($getState(paragraph, tagsState).size).toBe(0);
+        expect(paragraph.exportJSON()[NODE_STATE_KEY]).toEqual({
+          [`other${S}x`]: 1,
+          [`plain${S}key`]: 'v',
+        });
+      },
+      {discrete: true},
+    );
+  });
+
+  test("a collab: 'set' key can not contain the separator", () => {
+    expect(() =>
+      createState(`bad${S}key`, {collab: 'set', parse: () => new Set()}),
+    ).toThrow(/must not contain U\+001F/);
+  });
+
+  test('$getCollabSetStateKeys lists the set-valued keys of a node', () => {
+    const editor = createEditor({
+      nodes: [],
+      onError: error => {
+        throw error;
+      },
+    });
+    editor.update(
+      () => {
+        const paragraph = $createParagraphNode();
+        expect($getCollabSetStateKeys(paragraph)).toEqual(new Set());
+        $setState(paragraph, colorState, 'red');
+        $setState(paragraph, tagsState, new Set(['a']));
+        expect($getCollabSetStateKeys(paragraph.getLatest())).toEqual(
+          new Set(['tags']),
+        );
+        // Registered for the node type once used, even on a node without it
+        const other = $createParagraphNode();
+        $setState(other, colorState, 'blue');
+        expect($getCollabSetStateKeys(other.getLatest())).toEqual(
+          new Set(['tags']),
+        );
+        // JSON is one sorted array
+        expect(paragraph.exportJSON()[NODE_STATE_KEY]).toEqual({
+          color: 'red',
+          tags: ['a'],
+        });
+      },
+      {discrete: true},
+    );
   });
 });

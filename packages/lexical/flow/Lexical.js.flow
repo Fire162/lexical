@@ -1966,16 +1966,27 @@ declare export class StateConfig<K extends string, V> {
   readonly isEqual: (a: V, b: V) => boolean;
   readonly defaultValue: V;
   readonly resetOnCopyNode: boolean;
+  readonly collab: StateCollabEncoding;
   readonly schema?: AnySerializationSchema;
   constructor(key: K, stateValueConfig: StateValueConfig<V>): this;
 }
+
+export type StateCollabEncoding = 'value' | 'set';
 
 export type StateValueConfig<V> = {
   parse: (jsonValue: unknown) => V;
   unparse?: (parsed: V) => unknown;
   isEqual?: (a: V, b: V) => boolean;
   resetOnCopyNode?: boolean;
+  collab?: StateCollabEncoding;
 }
+
+declare export var NODE_STATE_SET_MEMBER_SEPARATOR: '\u001f';
+declare export function splitCollabStateEntries(
+  entries: Readonly<{[string]: unknown}>,
+  isSetKey: (key: string) => boolean,
+): {[string]: unknown};
+declare export function $getCollabSetStateKeys(node: LexicalNode): Set<string>;
 
 export type Parse<T> = (value: unknown) => T;
 // A callable carrying its own metadata, so introspecting tooling
