@@ -28,7 +28,7 @@ Note that the local server needs to be running in order to run the e2e tests.
 - `pnpm run start`
 - `pnpm run test-e2e-chromium` (to run only chromium e2e tests)
 
-`pnpm run start` will start both the dev server and collab server. If you don't need collab, use `pnpm run dev` to start just the dev server.
+`pnpm run start` will start the dev server and the collab servers (`pnpm run collab` for `@lexical/yjs`, and `pnpm run collab:y` for the experimental `@lexical/y`, which the playground uses with `?isCollab=true&useCollabV3=true`). If you don't need collab, use `pnpm run dev` to start just the dev server.
 
 If you're contributing to the website or documentation, you can run docusaurus
 with:

@@ -25,6 +25,10 @@ import * as React from 'react';
 import {type JSX, useEffect, useLayoutEffect, useRef} from 'react';
 
 import {createWebsocketProvider, skipCollaborationInit} from '../collaboration';
+import {
+  COLLAB_V3_NESTED_EDITOR_NOTICE,
+  useCollabV3NestedEditor,
+} from '../hooks/useCollabV3NestedEditor';
 import {$isStickyNode} from './StickyNode';
 
 interface Positioning {
@@ -74,6 +78,7 @@ export default function StickyComponent({
     y: 0,
   });
   const {isCollabActive} = useCollaborationContext();
+  const isReadOnly = useCollabV3NestedEditor(caption);
 
   useEffect(() => {
     const position = positioningRef.current;
@@ -191,6 +196,7 @@ export default function StickyComponent({
     <div ref={stickyContainerRef} className="sticky-note-container">
       <div
         className={`sticky-note ${color}`}
+        title={isReadOnly ? COLLAB_V3_NESTED_EDITOR_NOTICE : undefined}
         onPointerDown={event => {
           const stickyContainer = stickyContainerRef.current;
           if (

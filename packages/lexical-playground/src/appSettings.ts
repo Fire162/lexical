@@ -41,6 +41,7 @@ export const DEFAULT_SETTINGS = {
   tableCellMerge: true,
   tableHorizontalScroll: true,
   useCollabV2: false,
+  useCollabV3: false,
 } as const;
 
 // These are mutated in setupEnv

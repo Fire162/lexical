@@ -46,6 +46,7 @@ import {
   CollaborationPluginV2__EXPERIMENTAL,
 } from '@lexical/react/LexicalCollaborationPlugin';
 import {LexicalExtensionComposer} from '@lexical/react/LexicalExtensionComposer';
+import {LexicalExtensionEditorComposer} from '@lexical/react/LexicalExtensionEditorComposer';
 import {
   $createHeadingNode,
   $createQuoteNode,
@@ -61,7 +62,7 @@ import {
   configExtension,
   defineExtension,
 } from 'lexical';
-import {type JSX, useMemo} from 'react';
+import {type JSX, type ReactNode, Suspense, use, useMemo} from 'react';
 import {Doc} from 'yjs';
 
 import {isDevPlayground} from './appSettings';
@@ -261,7 +262,8 @@ const AppExtension = defineExtension({
     // Exposes editor.isEditable() as a signal; consumed by
     // registerSettingsSynchronization to drive ClickableLinkExtension.
     WatchEditableExtension,
-    HistoryExtension,
+    // HistoryExtension is added by buildExtensionFromSettings: collab v3's
+    // YCollabExtension provides undo and conflicts with it.
     HistoryAnnounceExtension,
     EditorModeAnnounceExtension,
     KeywordsExtension,
@@ -326,19 +328,31 @@ interface DynamicSettings {
   isCollab: boolean;
   emptyEditor: boolean;
   isRichText: boolean;
+  /**
+   * Collaboration v3 (`@lexical/y`): its YCollabExtension (added by
+   * `collaborationY.tsx`) provides undo, so HistoryExtension is left out.
+   */
+  isCollabV3?: boolean;
 }
 
 function buildExtensionFromSettings(settings: DynamicSettings) {
-  const {isCollab, emptyEditor, isRichText} = settings;
+  const {isCollab, emptyEditor, isRichText, isCollabV3 = false} = settings;
   return defineExtension({
-    $initialEditorState: isCollab
-      ? null
-      : emptyEditor
-        ? undefined
-        : $prepopulatedRichText,
+    // Collab v1/v2 bootstrap an empty document from the plugin. Collab v3's
+    // binding writes the editor's initial state (an empty paragraph) into an
+    // empty document, once even when several clients do it at the same time.
+    $initialEditorState: isCollabV3
+      ? undefined
+      : isCollab
+        ? null
+        : emptyEditor
+          ? undefined
+          : $prepopulatedRichText,
     dependencies: [
       AppExtension,
-      /* @__PURE__ */ configExtension(HistoryExtension, {disabled: isCollab}),
+      ...(isCollabV3
+        ? []
+        : [configExtension(HistoryExtension, {disabled: isCollab})]),
       isRichText ? PlaygroundRichTextExtension : PlainTextExtension,
     ],
     name: '@lexical/playground/dynamic-config',
@@ -354,12 +368,14 @@ function App(): JSX.Element {
     settings: {
       isCollab,
       useCollabV2,
+      useCollabV3,
       emptyEditor,
       isRichText,
       isShadowDOM,
       measureTypingPerf,
     },
   } = useSettings();
+  const isCollabV3 = isRichText && isCollab && useCollabV3;
 
   // Only the editor-recreating settings belong in this memo's deps. Table
   // behavior toggles (and other live-reconfigurable settings) are applied
@@ -370,50 +386,86 @@ function App(): JSX.Element {
     [emptyEditor, isCollab, isRichText],
   );
 
+  const shell = (
+    <ToolbarContext>
+      <header>
+        <a href="https://lexical.dev" target="_blank" rel="noreferrer">
+          <span className="logo" role="img" aria-label="Lexical Logo" />
+        </a>
+      </header>
+      {isRichText && isCollab && !isCollabV3 ? (
+        useCollabV2 ? (
+          <CollabV2
+            id={COLLAB_DOC_ID}
+            shouldBootstrap={!skipCollaborationInit}
+          />
+        ) : (
+          <CollaborationPlugin
+            id={COLLAB_DOC_ID}
+            providerFactory={createWebsocketProvider}
+            shouldBootstrap={!skipCollaborationInit}
+            selectionHighlight={true}
+          />
+        )
+      ) : null}
+      {isShadowDOM ? (
+        <ShadowDomWrapper>
+          <div className="editor-shell">
+            <Editor />
+          </div>
+        </ShadowDomWrapper>
+      ) : (
+        <div className="editor-shell">
+          <Editor />
+        </div>
+      )}
+      <Settings />
+      {isDevPlayground ? <DocsPlugin /> : null}
+      {isDevPlayground ? <PasteLogPlugin /> : null}
+      {isDevPlayground ? <TestRecorderPlugin /> : null}
+
+      {measureTypingPerf ? <TypingPerfPlugin /> : null}
+    </ToolbarContext>
+  );
+
   return (
     <LexicalCollaboration>
-      <LexicalExtensionComposer extension={app} contentEditable={null}>
-        <ToolbarContext>
-          <header>
-            <a href="https://lexical.dev" target="_blank" rel="noreferrer">
-              <span className="logo" role="img" aria-label="Lexical Logo" />
-            </a>
-          </header>
-          {isRichText && isCollab ? (
-            useCollabV2 ? (
-              <CollabV2
-                id={COLLAB_DOC_ID}
-                shouldBootstrap={!skipCollaborationInit}
-              />
-            ) : (
-              <CollaborationPlugin
-                id={COLLAB_DOC_ID}
-                providerFactory={createWebsocketProvider}
-                shouldBootstrap={!skipCollaborationInit}
-                selectionHighlight={true}
-              />
-            )
-          ) : null}
-          {isShadowDOM ? (
-            <ShadowDomWrapper>
-              <div className="editor-shell">
-                <Editor />
-              </div>
-            </ShadowDomWrapper>
-          ) : (
-            <div className="editor-shell">
-              <Editor />
-            </div>
-          )}
-          <Settings />
-          {isDevPlayground ? <DocsPlugin /> : null}
-          {isDevPlayground ? <PasteLogPlugin /> : null}
-          {isDevPlayground ? <TestRecorderPlugin /> : null}
-
-          {measureTypingPerf ? <TypingPerfPlugin /> : null}
-        </ToolbarContext>
-      </LexicalExtensionComposer>
+      {isCollabV3 ? (
+        <Suspense fallback={null}>
+          <CollabV3>{shell}</CollabV3>
+        </Suspense>
+      ) : (
+        <LexicalExtensionComposer extension={app} contentEditable={null}>
+          {shell}
+        </LexicalExtensionComposer>
+      )}
     </LexicalCollaboration>
+  );
+}
+
+let collabYModule: Promise<typeof import('./collaborationY')> | null = null;
+
+/**
+ * Collaboration v3 (`@lexical/y` on Yjs 14). Loaded on demand, so the default
+ * playground does not ship a second Yjs.
+ */
+function CollabV3({children}: {children: ReactNode}) {
+  const {CollabYPlugin, getCollabYSession} = use(
+    (collabYModule ??= import('./collaborationY')),
+  );
+  const {editor, provider} = getCollabYSession(COLLAB_DOC_ID, () =>
+    buildExtensionFromSettings({
+      emptyEditor: true,
+      isCollab: true,
+      isCollabV3: true,
+      isRichText: true,
+    }),
+  );
+  return (
+    <LexicalExtensionEditorComposer initialEditor={editor}>
+      <CollabYPlugin provider={provider} />
+      {children}
+    </LexicalExtensionEditorComposer>
   );
 }
 

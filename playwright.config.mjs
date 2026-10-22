@@ -13,9 +13,11 @@ const IS_CI = CI === 'true';
 // PWDEBUG=1 is set by Playwright's `--debug` flag before this config loads;
 // retries during a debug run only add confusion (the test already paused once).
 const IS_DEBUG = PWDEBUG === '1';
+const IS_COLLAB_V3 = E2E_EDITOR_MODE === 'rich-text-with-collab-v3';
 const IS_COLLAB =
   E2E_EDITOR_MODE === 'rich-text-with-collab' ||
-  E2E_EDITOR_MODE === 'rich-text-with-collab-v2';
+  E2E_EDITOR_MODE === 'rich-text-with-collab-v2' ||
+  IS_COLLAB_V3;
 // Collab mode needs extra horizontal space because the contextual menu is
 // hardcoded to the right side; non-collab needs enough room that text
 // doesn't wrap and break CMD+ArrowRight/Left navigation.
@@ -59,6 +61,12 @@ const config = defineConfig({
     : undefined,
   retries: IS_DEBUG ? 0 : IS_CI ? 2 : 1,
   testIgnore: /\/__tests__\/(?:unit|browser)\//,
+  // Collab v3 (`@lexical/y`) runs the collaboration specs, not the whole
+  // suite: the playground's comments and nested editors (captions, sticky
+  // notes) are not synced by it, so most feature specs do not apply.
+  testMatch: IS_COLLAB_V3
+    ? /\/e2e\/(?:Collaboration|CollabV3[^/]*)\.spec\.mjs$/
+    : undefined,
   timeout: 150000,
   use: {
     actionTimeout: 10000, // Max time to wait for actions
