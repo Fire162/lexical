@@ -17,6 +17,7 @@ import {
   createEditor,
   type EditorState,
   ElementNode,
+  type LexicalEditor,
   type LexicalNode,
   type SerializedLexicalNode,
 } from 'lexical';
@@ -276,6 +277,29 @@ function firstDifference(a: unknown, b: unknown, path: string): string | null {
  * structure, link fields, text and formats; derived fields aside). Catches
  * writer and reader mapping bugs alike.
  */
+/**
+ * Make the set-valued StateConfigs known to `from` (registered by an
+ * extension, or used there) known to `to` too, so that `to` joins the
+ * per-member formats it reads into sets the way `from` does.
+ */
+function shareSetStateConfigs(from: LexicalEditor, to: LexicalEditor): void {
+  for (const [type, info] of from._nodes) {
+    const target = to._nodes.get(type);
+    if (target === undefined) {
+      continue;
+    }
+    const {sharedConfigMap} = target.sharedNodeState;
+    for (const stateConfig of info.sharedNodeState.sharedConfigMap.values()) {
+      if (
+        stateConfig.collab === 'set' &&
+        !sharedConfigMap.has(stateConfig.key)
+      ) {
+        sharedConfigMap.set(stateConfig.key, stateConfig);
+      }
+    }
+  }
+}
+
 export function checkContainer(
   state: State,
   cs: CS,
@@ -305,6 +329,7 @@ export function checkContainer(
       throw e;
     },
   });
+  shareSetStateConfigs(state.editor, fresh);
   let read: Attrs | null = null;
   let problem: string | null = null;
   try {

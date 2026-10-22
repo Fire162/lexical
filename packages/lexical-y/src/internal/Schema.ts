@@ -7,6 +7,7 @@
  */
 
 import {
+  $getCollabSetStateKeys,
   $isElementNode,
   $isLineBreakNode,
   $isTextNode,
@@ -20,6 +21,7 @@ import {
   type Klass,
   type LexicalNode,
   type NodeKey,
+  splitCollabStateEntries,
   TEXT_TYPE_TO_FORMAT,
   type TextNode,
 } from 'lexical';
@@ -575,7 +577,7 @@ export const decodeFormatValue = (v: unknown): unknown => {
 /** Format attributes of a line break: its NodeState. */
 export function $lineBreakAttrs(node: LexicalNode, wrapperAttrs: Attrs): Attrs {
   const own: Attrs = {};
-  $stateAttrs(node, own);
+  $stateAttrs(node, own, '', true);
   return {...wrapperAttrs, ...encodeFormats(own)};
 }
 
@@ -591,6 +593,27 @@ export function lineBreakStateFromAttrs(encoded: Attrs): Attrs {
     }
   }
   return state;
+}
+
+/**
+ * The NodeState entries of a node to store. With `split`, a set-valued state
+ * (`collab: 'set'`) is one entry per member (see splitCollabStateEntries),
+ * so that concurrent changes to different members merge; that is done for
+ * text runs, line breaks and nodes stored as their own Y.Node, where the
+ * readers join the members back. Other places store it whole.
+ */
+function $collabStateEntries(
+  node: LexicalNode,
+  state: Attrs,
+  split: boolean,
+): Attrs {
+  if (!split) {
+    return state;
+  }
+  const setKeys = $getCollabSetStateKeys(node);
+  return setKeys.size === 0
+    ? state
+    : splitCollabStateEntries(state, key => setKeys.has(key));
 }
 
 function encodeFormats(attrs: Attrs): Attrs {
@@ -615,9 +638,27 @@ function putValue(attrs: Attrs, key: string, value: unknown, what: string) {
 }
 
 /** NodeState entries as `s:<key>` attributes. */
-export function $stateAttrs(node: LexicalNode, out: Attrs, prefix = ''): void {
+export function $stateAttrs(
+  node: LexicalNode,
+  out: Attrs,
+  prefix = '',
+  split = false,
+): void {
   const state = node.__state;
   if (!state) {
+    return;
+  }
+  if (split) {
+    const own: Attrs = {};
+    $stateAttrs(node, own);
+    const entries: Attrs = {};
+    for (const k in own) {
+      entries[k.slice(STATE_PREFIX.length)] = own[k];
+    }
+    const stored = $collabStateEntries(node, entries, true);
+    for (const k in stored) {
+      out[prefix + STATE_PREFIX + k] = stored[k];
+    }
     return;
   }
   const [unknown = {}, known] = state.getInternalState();
@@ -695,8 +736,9 @@ export function $nodeAttrs(node: LexicalNode): Attrs {
   }
   const state = json.$ as Attrs | undefined;
   if (state) {
-    for (const k in state) {
-      putValue(attrs, STATE_PREFIX + k, state[k], `NodeState ${k}`);
+    const stored = $collabStateEntries(latest, state, true);
+    for (const k in stored) {
+      putValue(attrs, STATE_PREFIX + k, stored[k], `NodeState ${k}`);
     }
   }
   // An element's textFormat/textStyle are always stored (see $lineAttrs).
@@ -782,8 +824,9 @@ export function $textAttrs(node: TextNode, segment: string | null): Attrs {
   }
   const state = json.$ as Attrs | undefined;
   if (state) {
-    for (const k in state) {
-      putValue(attrs, STATE_PREFIX + k, state[k], `NodeState ${k}`);
+    const stored = $collabStateEntries(latest, state, true);
+    for (const k in stored) {
+      putValue(attrs, STATE_PREFIX + k, stored[k], `NodeState ${k}`);
     }
   }
   if (segment !== null) {
