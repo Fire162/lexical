@@ -31,6 +31,9 @@ upstream issue): projects that type-check with `tsc` need `skipLibCheck: true`.
   document with client ids that fit a server's range), `LAYOUT_VERSION`,
   `DEFAULT_ROOT_NAME` (`'lexical-y'`), and the types `YBindingOptions`,
   `YBindingStatus`, `YCollabConfig`, `YCursor`, `ClientIDRange`.
+- `@lexical/y/headless`: server-side edits, seeds and reads of a stored
+  state: `editYState`, `seedYState`, `readYState`, `createHeadlessYEditor`,
+  `YHeadlessError` (see Server-side editing).
 - `@lexical/y/server`: `inspectUpdateRoots`, `isUpdateForLayout` (reject
   updates from clients that write to another root), `writeUpgradeNotice` (a
   notice that old clients show), `LAYOUT_VERSION`, `DEFAULT_ROOT_NAME` and the
@@ -114,6 +117,86 @@ turns the check off.
   from a document that already has a 32-bit id. Use `createYDoc({compat:
   'yrs-0.23'})` for that. `clientIDRange: 'uint32'` applies when the binding
   starts, so an awareness created before that keeps a 53-bit id.
+
+## Server-side editing
+
+`@lexical/y/headless` runs Lexical edits on a stored Yjs 14 state, without a
+DOM, through the same binding as the clients:
+
+```ts
+import {editYState, readYState, seedYState} from '@lexical/y/headless';
+
+// The clients' extensions (or nodes), so the server writes what a client would.
+const config = {extensions: [AppNodesExtension], clientIDRange: 'uint32'};
+
+// A new document (identical content gives identical bytes).
+const state = seedYState(config, () => {
+  $getRoot().append($createParagraphNode().append($createTextNode('Hi')));
+});
+
+// One edit: one merged update, checked to write only to the layout root.
+const {update, state: next} = editYState(state, config, () => {
+  $getRoot().append($createParagraphNode());
+});
+// Broadcast `update` to the room; store `next`.
+
+const json = readYState(next, config, () =>
+  $getEditor().getEditorState().toJSON(),
+);
+```
+
+- `editYState(state, config, $edit, {allowedRoots, transact, tag})` opens the
+  document, runs `$edit` in one discrete update (then commits the updates it
+  made listeners schedule, such as ids for new blocks), and returns
+  `{update, state, warnings}`: the merged update of everything it wrote
+  (including what opening the document wrote, which the edit may build on),
+  or `update: null` when nothing changed, and the state with it merged in.
+  The update is refused unless every root it writes to is in
+  `allowedRoots` (default: the layout root); `transact(doc)` writes other
+  shared types (an activity log) into the same update. An error thrown by
+  `$edit` is rethrown and nothing is returned.
+- `seedYState(config, $build)` writes `$build`'s content into an empty root
+  the way `initialize()` does: a client id derived from the content, outside
+  any undo history. Two seeds of identical content merge into one copy
+  (content with random parts, such as drawn block ids, is not identical).
+- `readYState(state, config, $read)` returns what `$read` reads; nothing is
+  written. What opening the document writes (ids an extension gives blocks
+  stored without one, repairs) is read but not stored, so such values can
+  differ between reads: store the update of `editYState(state, config, () =>
+  {})` once before relying on them.
+- `createHeadlessYEditor({...config, state})` returns `{editor, doc,
+  binding, warnings, dispose}` (also disposable with `using`) for anything
+  else. Collaborative undo is off.
+- They throw a `YHeadlessError` with a `code`: `'not-initialized'` (no
+  layout record: seed first), `'read-only'` (a newer layout, unknown node
+  types; the message has the binding's reason) or `'foreign-roots'`.
+- Warnings (a recovered write, a self-check mismatch, why a document is read
+  only) go to `config.onWarn` (default: `console.warn` outside production)
+  and the result's `warnings`. They never refuse an edit, in development or
+  production. `config.selfCheck` sets the binding's self-check.
+- Cost at 10,000 paragraphs (Node 24, development build): open about
+  180 ms, one edit plus its checks about 300 ms in total, an update of
+  about 70 bytes; it grows linearly.
+
+Server patterns:
+
+- **One writer per document at a time.** Run a document's server edits one
+  after another, each on the latest stored state, and store each update
+  before the next edit starts. `editYState` returns `state` merged from its
+  input: two edits run at once from the same stored state each return a
+  state without the other's update, and storing both loses one. (Their
+  updates themselves merge like any peers'; if edits must run in parallel,
+  merge each update into the stored state rather than storing `state`.)
+  Clients' concurrent edits merge with the server's as with any peer's.
+- **Reject updates to old roots.** Check incoming client updates with
+  `isUpdateForLayout(update, {doc})` from `@lexical/y/server`, so a tab still
+  running an older client cannot write to `root` or `root-v2`, and pass
+  `allowedRoots` to `editYState` for the server's own extra roots.
+- **yrs compatibility.** When updates pass through yrs before 0.28 (a relay
+  or a store on y-crdt 0.23), use `clientIDRange: 'uint32'` on the server
+  and on every client (`createYDoc({compat: 'yrs-0.23'})`). Otherwise such
+  a relay stores the server's update under a truncated client id, and a
+  client that also received the update directly shows it twice.
 
 ## Layout
 

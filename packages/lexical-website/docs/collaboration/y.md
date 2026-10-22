@@ -166,7 +166,9 @@ and NodeState. A custom block of inline content can declare
 ## Servers
 
 Any Yjs 14 server or relay can host the documents, and `@lexical/y/server`
-provides helpers that have no editor dependencies:
+provides helpers that have no editor dependencies (to edit, seed or read
+documents on the server, see
+[Server-side editing with `@lexical/y`](./y-server.md)):
 
 - `isUpdateForLayout(update, {doc})` returns whether an update writes only to
   the `@lexical/y` root. A server can reject updates from clients that still
